@@ -1,0 +1,1268 @@
+---
+title: "Genki Balls Marsh prelim"
+author: "Kacie Kajihara"
+date: "2025-10-04"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+```{r setup, include=FALSE, cache=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Read in data
+Data was processed in QIIME2 following [Sarah Tucker's 16S pipeline](https://github.com/tucker4/Tucker_Phytoplankton_KByT_HeNERR/blob/main/analysis/Qiime_to_Phyloseq/Tucker_et_al_Qiime_to_Phyloseq.Rmd).
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggh4x)
+library(funrar)
+library(paletteer)
+library(stringr)
+library(vegan)
+library(tidyr)
+```
+
+<!-- Other: NCBI submission -->
+<!-- ```{r} -->
+<!-- # prep file names for NCBI SRA submission -->
+<!-- bioproject <- read.delim("~/Downloads/table_download.tsv") -->
+<!-- bioproject$name2 <- ifelse(grepl("G", bioproject$BioSample.name),  -->
+<!--                            str_replace_all(bioproject$BioSample.name, "-", "_"), -->
+<!--                            str_replace(bioproject$BioSample.name, "_", "-")) -->
+
+<!-- bioproject$name2[2] <- "L8-1100823" -->
+
+<!-- fnames <- list.files("all_tank_samples/") -->
+<!-- r1 <- fnames[grepl("_R1_", fnames)] -->
+<!-- r1 <- r1[!(r1 %in% c("G27_S98_L001_R1_001.fastq.gz", "G45_S99_L001_R1_001.fastq.gz"))] -->
+<!-- r2 <- fnames[grepl("_R2_", fnames)] -->
+
+
+<!-- bioproject$filename <- r1[str_detect(r1, regex(paste(bioproject$name2, collapse="|")))] -->
+
+
+<!-- bioproject$filename <- r1[grep(paste(bioproject$name2, collapse="|"), -->
+<!--                                 r1)] -->
+
+<!-- bioproject <- bioproject %>% -->
+<!--   rowwise() %>% -->
+<!--   mutate(filename = r1[str_detect(r1, fixed(name2))][1]) %>% -->
+<!--   mutate(filename2 = r2[str_detect(r2, fixed(name2))][1]) -->
+
+<!-- write.csv( bioproject, "ncbi_sra_info.csv") -->
+
+<!-- ``` -->
+
+# Data Prep
+
+```{r, message=FALSE, warning=FALSE}
+setwd("~/Desktop/Genki Ball Sequence Data/")
+
+asvtable <- read.delim("~/Desktop/Genki Ball Sequence Data/qiime2/asvtable_export/genki_asvtable.tsv")
+original_tax <- read.delim("~/Desktop/Genki Ball Sequence Data/qiime2/taxonomy_export/taxonomy.tsv")
+
+# break up taxonomy info into separate columns
+tax <- original_tax %>%
+  tidyr::separate(Taxon, 
+           c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+           sep = ";")
+
+# remove prefixes
+tax$Kingdom <- substr(tax$Kingdom, 4, nchar(tax$Kingdom))
+tax[,3:8] <- apply(tax[,3:8], 2, function(x) substr(x, 5, nchar(x)))
+
+# make more legible ASV names
+tax$ASV_name <- paste0("ASV", 1:nrow(tax))
+
+asvtable$ASV_name <- tax$ASV_name[match(tax$Feature.ID, asvtable$X)]
+
+asvtable <- asvtable %>% 
+  select(X, ASV_name, everything()) %>%
+  tibble::column_to_rownames("ASV_name")
+
+asvtable <- asvtable[,2:ncol(asvtable)]
+
+#write.csv(asvtable, "outputs/newsamps/tank_and_field_asv_table_before_cull.csv")
+
+```
+
+## Quality control
+
+Sarah's [PeerJ paper](https://peerj.com/articles/12274/) removed ASVs if they didn't have at least 10 reads across 2 samples. 
+
+8845 ASVs are only present in one sample. The histogram shows ASV read sums.
+```{r}
+asv_presabs <- asvtable
+asv_presabs[asv_presabs>0] <- 1
+
+singletons <- asv_presabs[rowSums(asv_presabs)==1,]
+singletons <- singletons[,colSums(singletons)>0]
+
+test <- asvtable[rownames(asvtable)%in%rownames(singletons),]
+hist(rowSums(test), breaks=200)
+
+```
+
+Here is the breakdown of how many singleton ASVs had how many reads. 2060 ASVs had 2 reads, 1293 ASVs had 3 reads, and so on.
+
+```{r}
+table(rowSums(test))
+```
+
+```{r}
+ntc <- asvtable[,grepl("NTC", colnames(asvtable))]
+ntc <- ntc[rowSums(ntc)>0,]
+ntc$taxonomy <- tax$all[match(rownames(ntc), tax$ASV_name)]
+
+tax$all <- paste(tax$Kingdom, tax$Phylum, tax$Class, tax$Order, tax$Family, tax$Genus, tax$Species, sep=";")
+```
+
+
+For now, I did a quality control method from a former postdoc in my former lab, Laura Tipton.
+
+It involves looking for natural "breaks" in the plotted curve of log-transformed read sums per ASV. No clear breaks are seen here, but I went with a cutoff of 3 reads per now (cull any ASV with 3 or fewer reads) in efforts to get rid of potentially spurious things but maintain as much diversity as possible. 
+
+This got rid of 3353 ASVs (22% of the ASVs).
+
+I didn't cull any samples because the lowest read count was 15K.
+
+```{r}
+
+asvsums <- rowSums(asvtable)
+
+summary(asvsums)
+
+# is the maximum an outlier?
+tail(sort(asvsums),5)
+
+plot(sort(log1p(asvsums)), pch=19, xlab="Number of otus", ylab="Log of Reads", main="ASVs by read abundance with cutoffs set at 2, 3, and 10 reads")
+abline(h=log1p(2), lty=2, col="blue")
+abline(h=log1p(3), lty=2, col="green") # I selected this cutoff
+abline(h=log1p(10), lty=2, col="magenta")
+
+asv_culled <- asvtable[rowSums(asvtable)>3,] # removes 3353 ASVs
+```
+
+Sarah also removed anything undefined at domain and unclassified at phylum.
+
+This gets rid of 9 ASVs undefined at domain (all ASVs that were unclassified at phylum did have a domain assigned).
+
+```{r}
+unas_phy <- tax[tax$ASV_name %in% rownames(asv_culled),]
+unas_phy <- unas_phy[is.na(unas_phy$Phylum),]
+
+unassigned_kingdom <- tax[tax$ASV_name %in% rownames(asv_culled),]
+unassigned_kingdom <- unassigned_kingdom$ASV_name[unassigned_kingdom$Kingdom=="ssigned"]
+
+asv_culled2 <- asv_culled[!rownames(asv_culled) %in% unassigned_kingdom,]
+
+#write.csv(asv_culled2, "tank_asv_table_after_cull.csv")
+```
+
+## Apply filters on what's considered EM
+
+The ASV must have more than 10 reads across 2 or more samples.
+```{r}
+em_asv <- asv_culled2[,grepl("EM",names(asv_culled2))]
+em_asv <- em_asv[rowSums(em_asv)>0,]
+
+em_bool <- as.data.frame(em_asv > 0)
+em_keep <- rownames(em_bool[rowSums(em_bool)>1,])
+
+em_asv_keep <- em_asv[rownames(em_asv) %in% em_keep,]
+#em_asv_keep$tax <- tax$all[match(rownames(em_asv_keep), tax$ASV_name)]
+
+min(rowSums(em_asv_keep)) # minimum row sum was 15
+
+# remove old em samples
+asv_culled3 <- asv_culled2[,!grepl("EM", names(asv_culled2))]
+asv_culled3 <- as.data.frame(t(asv_culled3))
+
+asv_culled4 <- plyr::rbind.fill(asv_culled3, as.data.frame(t(em_asv_keep)))
+rownames(asv_culled4) <- c(rownames(asv_culled3), names(em_asv_keep))
+asv_culled4 <- as.data.frame(t(asv_culled4))
+
+sapply(asv_culled4, anyNA) # em samples have NAs
+
+asv_culled4[is.na(asv_culled4)] <- 0 # replace NA with 0
+asv_culled4 <- asv_culled4[rowSums(asv_culled4)>0,]
+
+check <- asv_culled4[,grepl("EM",names(asv_culled4))]
+check <- check[rowSums(check)>0,]
+
+#write.csv(asv_culled4, "outputs/newsamps/tank_and_field_asv_table_after_cull.csv")
+asv_culled4 <- read.csv("outputs/newsamps/tank_and_field_asv_table_after_cull.csv", row.names = 1)
+
+# make relative abundance table
+asv_ra <- t(asv_culled4)
+
+asv_ra <- funrar::make_relative(asv_ra)
+
+asv_ra <- as.data.frame(t(asv_ra))
+```
+
+
+**The final ASV table has 11,558 ASVs across 162 samples.**
+
+# What's in a genki ball, by genus (all genki balls)
+
+```{r, message=FALSE, warning=FALSE}
+tax <- read.csv("outputs/newsamps/tank_and_field_taxonomy.csv", row.names=1)
+
+# get genki ball data
+gballs_asv <- asv_ra[,grepl("B", names(asv_ra))]
+gballs_asv <- gballs_asv[rowSums(gballs_asv)>0,]
+
+
+gballs <- gballs_asv
+# add taxonomy info
+gballs$genus <- tax$Genus[match(rownames(gballs), tax$ASV_name)]
+gballs$family <- tax$Family[match(rownames(gballs), tax$ASV_name)]
+gballs$order <- tax$Order[match(rownames(gballs), tax$ASV_name)]
+gballs$class <- tax$Class[match(rownames(gballs), tax$ASV_name)]
+gballs$phylum <- tax$Phylum[match(rownames(gballs), tax$ASV_name)]
+gballs$kingdom <- tax$Kingdom[match(rownames(gballs), tax$ASV_name)]
+gballs$asv <- rownames(gballs)
+
+# transform table to long format
+gballs_long <- reshape2::melt(gballs)
+names(gballs_long) <- c("Genus", "Family", "Order", "Class", "Phylum", "Kingdom","ASV", "Ball_id", "Relative_Abundance")
+gballs_long$genfam <- paste(gballs_long$Family, gballs_long$Genus, sep=";")
+gballs_long$alltax <- paste(gballs_long$Kingdom,
+                            gballs_long$Phylum,
+                            gballs_long$Class,
+                            gballs_long$Order,
+                            gballs_long$Family,
+                            gballs_long$Genus,
+                            sep = ";")
+
+gballs_summ_g <- gballs_long %>%
+  dplyr::group_by(Ball_id, Genus, genfam, alltax) %>% 
+  dplyr::summarise(total = sum(Relative_Abundance)) %>%
+  dplyr::arrange(Ball_id, desc(total))
+
+gballs_summ_g <- gballs_summ_g[gballs_summ_g$total>0,]
+
+gballs_summ_f <- gballs_long %>%
+  dplyr::group_by(Ball_id, Family) %>% 
+  dplyr::summarise(total = sum(Relative_Abundance)) %>%
+  dplyr::arrange(Ball_id, desc(total))
+
+gballs_summ_f <- gballs_summ_f[gballs_summ_f$total>0,]
+
+# designate top 10 
+tenlist <- list()
+for (i in 1:length(unique(gballs_summ_g$Ball_id))) {
+  x = unique(gballs_summ_g$Ball_id)
+  y = gballs_summ_g[gballs_summ_g$Ball_id==x[[i]],]
+  tenlist[[x[[i]]]] = y$alltax[1:10]
+}
+  
+names(tenlist) <- unique(gballs_summ_g$Ball_id)
+# indicate the top 10 taxa in each gball
+gballs_summ_g$top10 <- FALSE
+gballs_summ_g$top10[1:10] <- TRUE
+gballs_summ_g$top10[131:140] <- TRUE
+gballs_summ_g$top10[276:285] <- TRUE
+
+# # put family names to the unassigned genera (use commented out code at bottom of chunk)
+top10_dat <- gballs_summ_g
+top10_dat$Genus <- ifelse(top10_dat$top10==TRUE, top10_dat$Genus, "Other")
+top10_dat$Genus <- ifelse(top10_dat$genfam=="Promicromonosporaceae;NA", "Promicromonosporaceae", top10_dat$Genus)
+top10_dat$Genus <- ifelse((grepl("Enterobacteriaceae", top10_dat$genfam) & top10_dat$top10==TRUE), "Enterobacteriaceae", top10_dat$Genus)
+#top10_dat$Genus <- ifelse(top10_dat$Genus=="Clostridium_sensu_stricto_1",
+#                          "Clostridium", top10_dat$Genus)
+
+# clean up labels
+top10_dat$Genus <- factor(top10_dat$Genus, levels = c("Bacillus",
+                                                      "Enterobacteriaceae",
+                                                      "Streptomyces",
+                                                      "Promicromonosporaceae",
+                                                      "Isoptericola",
+                                                      "Microbacterium",
+                                                      "Clostridium_sensu_stricto_1",
+                                                      "Cellulosimicrobium",
+                                                      "Olivibacter",
+                                                      "Promicromonospora",
+                                                      "Nocardioides",
+                                                      "Pseudoxanthomonas",
+                                                      "Other"))
+
+gen_palette <- c("#4059AD", "#003366", "#6B9AC4", "#97D8C4", "#117733", "#999933","#F4B942",
+                 "#CC6677", "#882255","#AA4499", "darkorchid4", "#330066", "#DDDDDD")
+
+top10_dat <- top10_dat %>%
+  mutate(Ball_id =  case_when(Ball_id == "G46_B1_X" ~ "Ball 1",
+                              Ball_id == "G47_B2_X" ~ "Ball 2",
+                              Ball_id == "G48_B3_X" ~ "Ball 3"))
+
+toplot <- top10_dat %>% group_by(Ball_id, Genus) %>% summarise(total = sum(total))
+toplot <- na.omit(toplot)
+toplot <- toplot[toplot$Ball_id %in% c("Ball 1", "Ball 2", "Ball 3"),]
+
+balltax <- ggplot(toplot, aes(x=Ball_id, y=total, fill=Genus)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = gen_palette) +
+  #scale_fill_manual(name = "Genus or Family", 
+  #                  values = c(paletteer_d("IslamicArt::samarqand")[1:11], "lightgray")) +
+  theme_classic() +
+  labs(x = "Genki Ball", y = "Relative Abundance", fill = "Genus or Family") +
+  theme(axis.text = element_text(color = "black"))
+
+
+
+# # plots for all gballs where colors are same across plots
+# all_unique_top10 <- unique(unlist(tenlist))
+# 
+# library(Polychrome)
+# # create your own color palette (50 colors) based on `seedcolors`
+# P47 = createPalette(47,  c("#ff0000", "#00ff00", "#0000ff"))
+# swatch(P47)
+# 
+# names(P47) <- all_unique_top10
+# P48 <- c(P47, "gray")
+# names(P48)[48] = "Other"
+# 
+#   
+# prep_for_top10 <- function(df_with_three_balls, thirty_tax) {
+#   x = list()
+#   df_with_three_balls$top10 <- FALSE
+#   
+#   firstten <- thirty_tax[1:10]
+#   secondten <- thirty_tax[11:20]
+#   thirdten <- thirty_tax[21:30]
+#   
+#   taxlist <- list(firstten, secondten, thirdten)
+#   
+#   for (i in 1:3) {
+#     y = unique(df_with_three_balls$Ball_id)
+#     z = df_with_three_balls[df_with_three_balls$Ball_id == y[[i]],]
+#     z$top10 <- ifelse(z$alltax %in% taxlist[[i]], TRUE, FALSE)
+#     z$alltax <- ifelse(z$top10==FALSE, "Other", z$alltax)
+#     x[[i]] <- z
+#   }
+#   
+#   abc <- do.call("rbind", x)
+#   
+#   return(abc)
+#   
+# }
+# 
+# original_three_balls <- gballs_summ_g[grepl("G4", gballs_summ_g$Ball_id),]
+# original_thirty_tax <- unlist(tenlist)[1:30]
+# 
+# orig_three_top10 <- prep_for_top10(original_three_balls, original_thirty_tax)
+# 
+# 
+# firstplot <- ggplot(orig_three_top10, aes(x=Ball_id, y=total*100, fill=alltax)) +
+#   geom_bar(stat = "identity") +
+#   scale_fill_manual(name = "Taxonomy",
+#                     values = P48[names(P48) %in% c(original_thirty_tax, "Other")]) +
+#   #scale_fill_manual(name = "Genus or Family", 
+#   #                  values = c(paletteer_d("IslamicArt::samarqand")[1:11], "lightgray")) +
+#   theme_classic() +
+#   labs(x = "Genki Ball", y = "Relative Abundance (%)") +
+#   theme(axis.text = element_text(color = "black"))
+# 
+# 
+# gbc1_three_balls <- gballs_summ_g[grepl("GBC1", gballs_summ_g$Ball_id),]
+# gbc1_thirty_tax <- unlist(tenlist[4:6])
+# 
+# gbc1_three_top10 <- prep_for_top10(gbc1_three_balls, gbc1_thirty_tax)
+# 
+# secondplot <- ggplot(gbc1_three_top10, aes(x=Ball_id, y=total*100, fill=alltax)) +
+#   geom_bar(stat = "identity") +
+#   scale_fill_manual(name = "Taxonomy",
+#                    values = P48[names(P48) %in% c(gbc1_thirty_tax, "Other")]) +
+#   #scale_fill_manual(name = "Genus or Family", 
+#   #                  values = c(paletteer_d("IslamicArt::samarqand")[1:11], "lightgray")) +
+#   theme_classic() +
+#   labs(x = "Genki Ball", y = "Relative Abundance (%)") +
+#   theme(axis.text = element_text(color = "black"))
+# 
+# 
+# gbc2_three_balls <- gballs_summ_g[grepl("GBC2", gballs_summ_g$Ball_id),]
+# gbc2_thirty_tax <- unlist(tenlist[7:9])
+# 
+# gbc2_three_top10 <- prep_for_top10(gbc2_three_balls, gbc2_thirty_tax)
+# 
+# thirdplot <- ggplot(gbc2_three_top10, aes(x=Ball_id, y=total*100, fill=alltax)) +
+#   geom_bar(stat = "identity") +
+#   scale_fill_manual(name = "Taxonomy",
+#                    values = P48[names(P48) %in% c(gbc2_thirty_tax, "Other")]) +
+#   #scale_fill_manual(name = "Genus or Family", 
+#   #                  values = c(paletteer_d("IslamicArt::samarqand")[1:11], "lightgray")) +
+#   theme_classic() +
+#   labs(x = "Genki Ball", y = "Relative Abundance (%)") +
+#   theme(axis.text = element_text(color = "black"))
+# 
+# 
+# gbc3_three_balls <- gballs_summ_g[grepl("GBC3", gballs_summ_g$Ball_id),]
+# gbc3_thirty_tax <- unlist(tenlist[10:12])
+# 
+# gbc3_three_top10 <- prep_for_top10(gbc3_three_balls, gbc3_thirty_tax)
+# 
+# fourthplot <- ggplot(gbc3_three_top10, aes(x=Ball_id, y=total*100, fill=alltax)) +
+#   geom_bar(stat = "identity") +
+#   scale_fill_manual(name = "Taxonomy",
+#                    values = P48[names(P48) %in% c(gbc3_thirty_tax, "Other")]) +
+#   #scale_fill_manual(name = "Genus or Family", 
+#   #                  values = c(paletteer_d("IslamicArt::samarqand")[1:11], "lightgray")) +
+#   theme_classic() +
+#   labs(x = "Genki Ball", y = "Relative Abundance (%)") +
+#   theme(axis.text = element_text(color = "black"))
+# 
+# library(patchwork)
+# 
+# try <- firstplot + secondplot + thirdplot + fourthplot + plot_layout(ncol=1) 
+
+#ggsave("figures/newseqs/top10.png", try, width=18, height=18)
+
+# ggsave("figures/genkiball_top10.png", width=7, height=5.5)  
+# 
+# top10_gen
+
+# for summarizing by family
+
+# gballs_summ_f <- gballs_long %>%
+#   dplyr::group_by(Ball_id, Family) %>%
+#   dplyr::summarise(total = sum(Relative_Abundance)) %>%
+#   dplyr::arrange(Ball_id, desc(total))
+
+```
+
+## EM
+
+```{r, warning=FALSE, message=FALSE}
+# use the EM ASVs and see what's in the genki balls
+em_data <- asv_ra[,grepl("EM", names(asv_ra))]
+em_data <- em_data[rowSums(em_data)>0,]
+
+em_asvs <- rownames(em_data)
+
+# add taxonomy info
+em_data$genus <- tax$Genus[match(rownames(em_data), tax$ASV_name)]
+em_data$family <- tax$Family[match(rownames(em_data), tax$ASV_name)]
+em_data$order <- tax$Order[match(rownames(em_data), tax$ASV_name)]
+em_data$class <- tax$Class[match(rownames(em_data), tax$ASV_name)]
+em_data$phylum <- tax$Phylum[match(rownames(em_data), tax$ASV_name)]
+em_data$asv <- rownames(em_data)
+
+# transform table to long format
+em_melt <- reshape2::melt(em_data)
+names(em_melt) <- c("Genus", "Family", "Order", "Class", "Phylum", "ASV", "EM_id", "Relative_Abundance")
+em_melt$general_genus <- ifelse(grepl("Clostridium", em_melt$Genus), "Clostridium", em_melt$Genus)
+
+em_melt$gen_or_fam <- ifelse(is.na(em_melt$general_genus),
+                             em_melt$Family,
+                             em_melt$general_genus)
+
+em_melt$gen_or_fam <- ifelse(grepl("uncultured|Incertae", em_melt$general_genus), 
+                             em_melt$Family,
+                             em_melt$gen_or_fam)
+
+
+em_summ_g <- em_melt %>%
+  dplyr::group_by(EM_id, gen_or_fam, Family) %>% 
+  dplyr::summarise(total = sum(Relative_Abundance)) %>%
+  dplyr::arrange(EM_id, desc(total))
+
+em_taxabar <- ggplot(em_summ_g, aes(x=EM_id, y=total, fill=factor(gen_or_fam, levels = rev(unique(em_summ_g$gen_or_fam))))) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  scale_fill_manual(values = c("Oscillospiraceae"="#DDA0DDFF",
+                               "Hungateiclostridiaceae"="#32CD32FF",
+                               "Anaerospora"="#FFA07AFF",
+                               "Ruminococcaceae"="#F0E68CFF",
+                               "Bacillus"="#4682B4FF",
+                               "Desulfotomaculum"="#40E0D0FF",
+                               "Lachnoclostridium"="#BA55D3FF",
+                               "Tissierella"="#D2B48CFF",
+                               "Acetobacter"="#87CEEBFF",
+                               "Clostridium"="#F2B701FF",
+                               "Lactobacillus"="#8FBC8BFF")) +
+  labs(x = "Sample", y = "Relative Abundance", fill = "Genus or Family") +
+  theme(axis.text = element_text(color = "black"))
+
+em_taxabar
+
+ggsave("figures/newseqs/forum/em_taxabar_clos_collapsed.pdf", em_taxabar, width=6, height=5)
+
+library(patchwork)
+twoplot <- em_taxabar + balltax
+
+ggsave("figures/newseqs/figs_apr2026/em_gb_taxonomy.png", twoplot, width=11, height=4.5)
+ggsave("figures/newseqs/figs_apr2026/em_gb_taxonomy.pdf", twoplot, width=11, height=4.5)
+
+# library(Polychrome)
+# # create your own color palette (50 colors) based on `seedcolors`
+# P47 = createPalette(117,  c("#ff0000", "#00ff00", "#0000ff"))
+# swatch(P47)
+# names(P47) <- unique(gballs_summ_f$Family)
+# 
+# 
+# gballs_summ_f <- gballs_summ_f[grepl("G4", gballs_summ_f$Ball_id),]
+# 
+# gballs_summ_f <- gballs_summ_f %>%
+#   mutate(Ball_id =  case_when(Ball_id == "G46_B1_X" ~ "Ball 1",
+#                               Ball_id == "G47_B2_X" ~ "Ball 2",
+#                               Ball_id == "G48_B3_X" ~ "Ball 3"))
+# 
+# gb_taxabar <- ggplot(gballs_summ_f, aes(x=Ball_id, y=total, fill=Family)) +
+#   geom_bar(stat = "identity") +
+#   theme_classic() +
+#   #scale_fill_manual(values = P47) +
+#   labs(x = "Genki Ball", y = "Relative Abundance") +
+#   theme(axis.text = element_text(color = "black"))
+# 
+# ggsave("figures/newseqs/figs_apr2026/gb_taxabar_family.png", gb_taxabar, width=13, height=7)
+# 
+gballs_summ_f$expected <- ifelse(gballs_summ_f$Family!="Lactobacillaceae", FALSE, TRUE)
+gballs_summ_f$expected <- replace_na(gballs_summ_f$expected, FALSE)
+# 
+# gb_lacto_bar <- ggplot(gballs_summ_f, aes(x=Ball_id, y=total, fill=Family, alpha=expected)) +
+#   geom_bar(stat = "identity") +
+#   theme_classic() +
+#   #scale_fill_manual(values = P47) +
+#   labs(x = "Genki Ball", y = "Relative Abundance", alpha = "Expected") +
+#   theme(axis.text = element_text(color = "black"))
+# 
+# ggsave("figures/newseqs/figs_apr2026/gb_lactobacillaceae_taxabar.png", width=13, height=7)
+
+# gballs_summ_asv <- gballs_long %>%
+#   dplyr::group_by(Ball_id, ASV) %>% 
+#   dplyr::summarise(total = sum(Relative_Abundance)) %>%
+#   dplyr::arrange(Ball_id, desc(total))
+# 
+# gballs_summ_asv <- gballs_summ_asv %>% 
+#   mutate(Ball_id =  case_when(Ball_id == "G46_B1_X" ~ "Ball 1",
+#                               Ball_id == "G47_B2_X" ~ "Ball 2",
+#                               Ball_id == "G48_B3_X" ~ "Ball 3"))
+# 
+# neg_asvs <- as.data.frame(asv_culled2[,grepl("NTC", names(asv_culled2))])
+# neg_asvs$asv <- rownames(asv_culled2)
+# neg_asvs <- neg_asvs[neg_asvs$`asv_culled2[, grepl("NTC", names(asv_culled2))]`>0,]
+# neg_asvs <- neg_asvs$asv
+```
+
+# Tank sediment microbiome over time
+
+```{r, fig.width=20}
+setwd("~/Desktop/Genki Ball Sequence Data/")
+# read in sediment metadata
+sed_metadata <- read.csv("metadata/Tank_Experiment_Sample_list.csv")
+sed_metadata$Combined.Name <- str_replace_all(sed_metadata$Combined.Name, "-", "_")
+# get sediment + genki ball data
+sed <- asv_ra[,names(asv_ra) %in% sed_metadata$Combined.Name]
+sed <- sed[rowSums(sed)>0,]
+
+sed$asv <- rownames(sed)
+
+# transform table to long format and add in sample context
+sed_long <- reshape2::melt(sed)
+sed_long <- sed_long[sed_long$value>0,]
+
+sed_long <- sed_long %>%
+  mutate(treatment = case_when(grepl("H", variable) ~ "High",
+                              grepl("C", variable) ~ "Control",
+                              grepl("L", variable) ~ "Low",
+                              grepl("B", variable) ~ "Genki Ball"))
+sed_long$timepoint <- str_sub(sed_long$variable, -1)
+sed_long$replicate <- paste0("R",str_sub(sed_long$variable, -3, -3))
+sed_long$tank <- sed_metadata$Tank[match(sed_long$variable, sed_metadata$Combined.Name)]
+
+sed_long <- sed_long %>% 
+  mutate(Ball_id =  case_when(variable == "G46_B1_X" ~ "Ball 1",
+                              variable == "G47_B2_X" ~ "Ball 2",
+                              variable == "G48_B3_X" ~ "Ball 3"),
+         days_since_deploy = case_when(timepoint == 1 ~ "T0",
+                                       timepoint == 2 ~ "T7",
+                                       timepoint == 3 ~ "T35",
+                                       timepoint == 4 ~ "T70",
+                                       timepoint == 5 ~ "T100"))
+
+#sed_long$days_since_deploy <- factor(sed_long$days_since_deploy, levels=c(0,7,35,70,100))
+
+# Sampling dates: 
+
+# Day 0: 10/4/23  
+# Day 7: 10/11/23  
+# Day 35: 11/8/23  
+# Day 70: 12/13/23  
+# Day 100: 1/12/24 
+
+# split data
+sed_only <- sed_long[!grepl("B", sed_long$variable),]
+ball_only <- sed_long[grepl("B", sed_long$variable),]
+before_deployment_only <- sed_long[(sed_long$timepoint==1),]
+control_only <- sed_long[sed_long$treatment=="Control",]
+
+sed_asv <- unique(sed_only$asv)
+ball_asv <- unique(ball_only$asv)
+before_deploy_asv <- unique(before_deployment_only$asv)
+control_asv <- unique(control_only$asv)
+
+em_asvs <- rownames(em_asv_keep)
+
+# shared asvs - things in the genki ball that were also in the sediment before ball deployment
+overlap <- unique(c(before_deploy_asv, control_asv))
+shared_asv <- intersect(ball_asv, overlap)
+
+# designate 4 community compartments: EM, genki ball, shared, Hamakua
+sed_long$category <- "Hamakua Microbiome"
+sed_long$category <- ifelse(sed_long$asv %in% ball_asv, "Genki Ball Background Microbiome", sed_long$category)
+sed_long$category <- ifelse(sed_long$asv %in% em_asvs, "EM Microbiome", sed_long$category) 
+sed_long$category <- ifelse(sed_long$asv %in% shared_asv, "Hamakua - Genki Ball Shared Microbiome", sed_long$category) 
+
+sed_long$category <- factor(sed_long$category, levels=c("EM Microbiome",
+                                                            "Genki Ball Background Microbiome",
+                                                            "Hamakua Microbiome",
+                                                            "Hamakua - Genki Ball Shared Microbiome"))
+
+sed_data <- sed_long[!grepl("B", sed_long$variable),]
+sed_data$treatment = factor(sed_data$treatment, levels = c("Control", "Low", "High"))
+
+gb_data <- sed_long[grepl("B", sed_long$variable),]
+gb_data$days_since_deploy = ""
+gb_data$treatment = "Genki Ball"
+
+sedgb <- plyr::rbind.fill(sed_data, gb_data)
+sedgb$treatment = factor(sedgb$treatment, levels = c("Genki Ball", "Control", "Low", "High"))
+
+sedgb$days_since_deploy = factor(sedgb$days_since_deploy, levels = c("T0", "T7", "T35", "T70", "T100"))
+
+sedgb_summ <- sedgb %>% group_by(treatment, replicate, category, days_since_deploy) %>% summarise(value = sum(value))
+
+sediment_colors <- c(
+  "EM Microbiome" = "#6B9AC4",
+  "Genki Ball Background Microbiome" = "#4059AD",
+  "Hamakua Microbiome" = "#97D8C4",
+  "Hamakua - Genki Ball Shared Microbiome" = "#F4B942")
+
+sedpl <- ggplot(sedgb_summ, aes(x = replicate, y = value, fill = category)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = sediment_colors) + # Apply the updated color palette
+  facet_nested(~ treatment + days_since_deploy, scales = "free") +
+  labs(x = "Sediment Sample Replicates", y = "Relative Abundance", fill = "ASV") +
+  theme(text = element_text(size = 16),
+        #axis.text.x = element_text(size = 12, angle = 60, hjust = 1),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title = element_text(size=16)) 
+
+sedpl
+
+#ggsave("figures/newseqs/sediment_microbiome.png", plot = sedpl, height=6, width=22)
+
+# # plot with no genki balls
+# sednogb <- sedgb[is.na(sedgb$Ball_id),] # remove genki balls
+# 
+# sednogb_pl <- ggplot(sednogb, aes(x = replicate_num, y = value, fill = category)) +
+#   geom_bar(stat = "identity", position = "stack") +
+#   scale_fill_manual(values = sediment_colors) + # Apply the updated color palette
+#   facet_nested(~ treatment + as.numeric(days_since_deploy), scales = "free") +
+#   labs(x = "Sediment Sample Replicates", y = "Relative Abundance", fill = "ASV") +
+#   theme(text = element_text(size = 16),
+#         axis.text.x = element_text(size = 12),
+#         axis.title = element_text(size=16)) 
+#         #axis.text.x = element_text(angle = 60, hjust = 1)) 
+  
+  
+```
+
+```{r}
+
+# gb_pl <- ggplot(gb_data, aes(x = replicate, y = value, fill = category)) +
+#   geom_bar(stat = "identity", position = "stack") +
+#   scale_fill_manual(values = sediment_colors) + # Apply the updated color palette
+#   facet_nested(~ treatment + days_since_deploy, scales = "free") +
+#   labs(x = "Sample Replicates", y = "Relative Abundance", fill = "ASV") +
+#   theme(text = element_text(size = 18))
+# 
+# ggsave("figures/newseqs/genkiball_sed_microbiome.png", plot = gb_pl, height=7, width=9)
+```
+
+
+
+# Tank water microbiome over time
+
+```{r, fig.width=16}
+water_metadata <- read.csv("metadata/Tank_Water_Metadata.csv")
+water_metadata$Sample.ID <- str_replace(water_metadata$Sample.ID, "_", ".")
+water_metadata$Sample.ID <- str_replace(water_metadata$Sample.ID, "L8.110823", "L8.1100823")
+
+# get water data
+water <- asv_ra[,names(asv_ra) %in% water_metadata$Sample.ID]
+water <- water[rowSums(water)>0,]
+
+water$asv <- rownames(water)
+
+# transform table to long format and add in sample context
+water_long <- reshape2::melt(water)
+water_long <- water_long[water_long$value>0,]
+
+water_long$treatment <- water_metadata$Treatment.Group[match(water_long$variable, water_metadata$Sample.ID)]
+
+water_long$replicate <- water_metadata$Replicate[match(water_long$variable, water_metadata$Sample.ID)]
+
+water_long$old_days <- water_metadata$Days.Since.Deployment[match(water_long$variable, water_metadata$Sample.ID)]
+
+water_long$tank <- water_metadata$Tank[match(water_long$variable, water_metadata$Sample.ID)]
+
+water_long <- water_long %>% 
+  mutate(days_since_deploy = case_when(old_days == 0 ~ "T0",
+                                       old_days == 3 ~ "T7",
+                                       old_days == 31 ~ "T35",
+                                       old_days == 61 ~ "T70",
+                                       old_days == 96 ~ "T100"))
+
+# Sampling dates: 
+
+# Day 0: 10/4/23  
+# Day 7: 10/11/23  
+# Day 35: 11/8/23  
+# Day 70: 12/13/23  
+# Day 100: 1/12/24 
+
+# split data
+water_before_deployment_only <- water_long[(water_long$days_since_deploy==0),]
+water_control_only <- water_long[water_long$treatment=="Control",]
+
+water_before_deploy_asv <- unique(water_before_deployment_only$asv)
+water_control_asv <- unique(water_control_only$asv)
+
+# shared asvs - things in the genki ball that were also in the water before ball deployment
+water_overlap <- unique(c(water_before_deploy_asv, water_control_asv))
+water_shared_asv <- intersect(water_overlap, ball_asv)
+
+# designate 4 community compartments: EM, genki ball, Hamakua, shared
+water_long$category <- "Hamakua Microbiome"
+water_long$category <- ifelse(water_long$asv %in% ball_asv, "Genki Ball Background Microbiome", water_long$category)
+water_long$category <- ifelse(water_long$asv %in% water_shared_asv, "Hamakua - Genki Ball Shared Microbiome", water_long$category) 
+water_long$category <- ifelse(water_long$asv %in% em_asvs, "EM Microbiome", water_long$category)
+
+water_long$treatment = factor(water_long$treatment, levels = c("Control", "Low", "High"))
+
+water_colors <- c(
+  "EM Microbiome" = "#6B9AC4",
+  "Genki Ball Background Microbiome" = "#4059AD",
+  "Hamakua Microbiome" = "#97D8C4",
+  "Hamakua - Genki Ball Shared Microbiome" = "#F4B942")
+
+water_long$category <- factor(water_long$category, levels=c("EM Microbiome",
+                                                            "Genki Ball Background Microbiome",
+                                                            "Hamakua Microbiome",
+                                                            "Hamakua - Genki Ball Shared Microbiome"))
+
+
+# add genki ball
+gb_water <- gb_data
+gb_water$category <- "Hamakua Microbiome"
+gb_water$category <- ifelse(gb_water$asv %in% ball_asv, "Genki Ball Background Microbiome", gb_water$category)
+gb_water$category <- ifelse(gb_water$asv %in% water_shared_asv, "Hamakua - Genki Ball Shared Microbiome", gb_water$category) 
+gb_water$category <- ifelse(gb_water$asv %in% em_asvs, "EM Microbiome", gb_water$category)
+
+watgb <- plyr::rbind.fill(water_long, gb_water)
+watgb$treatment = factor(watgb$treatment, levels = c("Genki Ball", "Control", "Low", "High"))
+watgb$days_since_deploy = factor(watgb$days_since_deploy, levels = c("T0", "T7", "T35", "T70", "T100"))
+
+watgb_summ <- watgb %>% group_by(treatment, replicate, category, days_since_deploy) %>% summarise(value = sum(value))
+
+watgb_summ$category <- factor(watgb_summ$category, levels=c("EM Microbiome",
+                                                            "Genki Ball Background Microbiome",
+                                                            "Hamakua Microbiome",
+                                                            "Hamakua - Genki Ball Shared Microbiome"))
+
+# with gb
+watpl <- ggplot(watgb_summ, aes(x = replicate, y = value, fill = category)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = water_colors) + # Apply the updated color palette
+  facet_nested(~ treatment + days_since_deploy, scales = "free") +
+  labs(x = "Water Sample Replicates", y = "Relative Abundance", fill = "ASV") +
+  theme(text = element_text(size = 16),
+        #axis.text.x = element_text(size = 12, angle = 60, hjust = 1),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title = element_text(size=16))
+
+# # no gb
+# watpl_nogb <- ggplot(water_long, aes(x = replicate, y = value, fill = category)) +
+#   geom_bar(stat = "identity", position = "stack") +
+#   scale_fill_manual(values = water_colors) + # Apply the updated color palette
+#   facet_nested(~ treatment + days_since_deploy, scales = "free") +
+#   labs(x = "Water Sample Replicates", y = "Relative Abundance", fill = "ASV") +
+#   theme(text = element_text(size = 16),
+#         axis.text.x = element_text(size = 12),
+#         axis.title = element_text(size=16))
+
+watpl
+
+#ggsave("figures/newseqs/water_microbiome.png", height = 7, width= 17)
+
+
+library(patchwork)
+
+#both <- sednogb_pl + watpl_nogb + plot_layout(ncol = 1, guides = "collect")
+
+both_with_gb <- sedpl + watpl + plot_layout(ncol = 1, guides = "collect")
+#ggsave("figures/newseqs/figs_apr2026/new_stacked_sed_water_bars.pdf", both_with_gb, width = 18, height=8)
+#ggsave("figures/newseqs/stacked_sediment_water_barcharts.pdf", both, width = 14.5, height=8)
+```
+
+# Taxonomy Bubble Plots for EM and GB
+Taxa as rows, samples as columns. Size indicates relative abundance
+```{r}
+
+emgb_asvs <- c("ASV142", "ASV179", "ASV232", "ASV352", "ASV665")
+em_for_bub <- asv_ra[,grepl("EM", names(asv_ra))]
+em_for_bub <- em_for_bub[rowSums(em_for_bub)>0,]
+
+gb_for_bub <- asv_ra[,grepl("_B", names(asv_ra))]
+gb_for_bub <- gb_for_bub[rowSums(gb_for_bub)>0,]
+
+#gb_for_bub <- gb_for_bub[!(rownames(gb_for_bub) %in% "ASV451"),]
+
+gb_bub_02 <- gb_for_bub[rowSums(gb_for_bub)>0.02,]
+gb_bub_02 <- gb_bub_02[!(rownames(gb_bub_02) %in% "ASV451"),]
+gb_bub_02 <- rbind(gb_bub_02, gb_for_bub[rownames(gb_for_bub) %in% emgb_asvs,])
+
+gb_and_em <- merge(em_for_bub, gb_bub_02, by = "row.names", all = TRUE)
+gb_and_em[is.na(gb_and_em)] <- 0
+
+names(gb_and_em)[c(1,5:7)] <- c("ASV", "Ball 1", "Ball 2", "Ball 3")
+
+gbem_long <- reshape2::melt(gb_and_em)
+gbem_long$category <- ifelse(grepl("EM", gbem_long$variable), "EM", "Genki Ball")
+gbem_long$ordering <- ifelse(gbem_long$category=="EM", 1, 2)
+gbem_long <- gbem_long[gbem_long$value>0,]
+gbem_long$ASV <- as.character(gbem_long$ASV)
+
+library(forcats)
+gbem_long$ASV <- fct_reorder(gbem_long$ASV, gbem_long$ordering)
+gbem_long$Genus <- tax$Genus[match(gbem_long$ASV, tax$ASV_name)]
+gbem_long$Species <- tax$Species[match(gbem_long$ASV, tax$ASV_name)]
+gbem_long$Family <- tax$Family[match(gbem_long$ASV, tax$ASV_name)]
+gbem_long$Class <- tax$Class[match(gbem_long$ASV, tax$ASV_name)]
+
+gbem_long$Species <- gsub("_", " ", gbem_long$Species)
+gbem_long$tax_label <- ifelse(is.na(gbem_long$Species),
+                              gbem_long$Genus,
+                              gbem_long$Species)
+
+gbem_long$fam_gen <- paste(gbem_long$Family, gbem_long$Genus, sep=";")
+gbem_long$test <- paste(gbem_long$Family, gbem_long$tax_label, sep=";")
+
+library(tidytext)
+
+
+# Create ordering that groups by category (EM vs GB) and keeps overlapping ASVs in middle
+gbem_long$both <- FALSE
+gbem_long$both[gbem_long$ASV %in% c(c("ASV45", "ASV61", "ASV142", "ASV179", "ASV232", "ASV352", "ASV665"))] <- TRUE
+
+gbem_long <- gbem_long %>%
+  group_by(category, Family) %>%
+  mutate(family_order = max(value)) %>%
+  ungroup() 
+
+gbem_long$order <- ifelse(gbem_long$both==TRUE, 2, ifelse(gbem_long$category=="EM", 3, 1))
+
+gbem_long <- gbem_long %>%
+  group_by(category) %>%
+  arrange(order, desc(family_order), Family, value, .by_group = TRUE)
+
+
+
+gbem_long <- gbem_long %>%
+  group_by(order) %>%
+  mutate(ASV_ordered = factor(ASV, levels = unique(ASV)))
+  
+  # Create ordering: EM-only, then both, then GB-only
+  # arrange(
+  #   ifelse(both, 2, ifelse(gbem_long$category=="EM", 1, 3)),  # Both in middle (2), EM top (1), GB bottom (3)
+  #   desc(family_order),
+  #   Family,
+  #   value
+  # ) %>%
+  # mutate(ASV_ordered = factor(ASV, levels = unique(ASV)))
+
+
+
+
+gbem_summ <- data.frame(asv = levels(gbem_long$ASV_ordered))
+gbem_summ$label <- gbem_long$tax_label[match(gbem_summ$asv, gbem_long$ASV_ordered)]
+
+
+#gbem_summ <- gbem_long %>% group_by(ASV, Family) %>% summarise(label = unique(tax_label))
+
+# palette
+family_colors <- c(
+  # set 1
+ "#377EB8", "#984EA3", "#A65628", "#F781BF", 
+
+#set 2
+"#66C2A5" ,"#FC8D62", "#8DA0CB" ,"#E78AC3" ,"#A6D854", "#FFD92F", "#E5C494", "#B3B3B3",
+
+#set 3
+"#8DD3C7", "#BEBADA", "#FB8072", "#80B1D3", "#FDB462", "#B3DE69", "#FCCDE5", "#BC80BD", "#CCEBC5"
+)
+
+
+set.seed(2)
+family_colors_final <- sample(family_colors)
+
+# Create the plot
+bubble_tax <- ggplot(gbem_long, aes(x = variable, 
+                                    y = ASV_ordered, 
+                                    size = value,
+                                    color = Family)) +
+  geom_point(alpha = 0.9) +
+  scale_size_continuous(limits = c(0.000001, 100), 
+                       range = c(1,150), 
+                       breaks = c(0.001, 0.01, 0.1, 0.5)) +
+  labs(x = "Sample", y = "ASV", size = "Relative Abundance", color = "Family") +
+  guides(colour = guide_legend(override.aes = list(size=5))) +
+  scale_color_manual(values = sample(family_colors_final)) +
+  theme_bw() +
+  theme(text = element_text(size=15.5),
+        axis.title.y.right = element_blank(),
+        axis.ticks.y = element_blank(),
+        strip.background = element_blank(), 
+        strip.text = element_blank()) +
+  scale_y_discrete(
+      sec.axis = dup_axis(
+      # You can use numeric input for breaks
+      breaks = seq_len(length(unique(gbem_long$ASV))),
+      # Watch out for the order of `table()` and your levels!
+      labels = gbem_summ$label)
+  )
+
+
+
+#ggsave("figures/newseqs/figs_apr2026/bubble_taxonomy_allsharedasvs.pdf", bubble_tax, width=10, height=14)
+
+```
+
+## Bubbles over time
+```{r}
+in_em <- rownames(em_asv_keep)
+in_gb <- ball_asv
+
+intersect(in_em, in_gb)
+
+in_water <- unique(water_long$asv)
+in_sediment <- unique(sed_long$asv)
+
+# take the 30 most relatively abundant ASVs - they are already in numerical order by decreasing RA
+asv_for_bub <- asv_ra[rownames(asv_ra) %in% in_em,]
+asv_for_bub <- asv_for_bub[,colSums(asv_for_bub)>0]
+
+sed_bub <- sed_long[sed_long$asv %in% in_em,]
+sed_bub <- sed_bub %>% group_by(asv, treatment, days_since_deploy) %>% summarise(tot = mean(value))
+sed_bub$new_category <- "Sediment"
+
+water_bub <- water_long[water_long$asv %in% in_em,]
+water_bub <- water_bub %>% group_by(asv, treatment, days_since_deploy) %>% summarise(tot = mean(value))
+water_bub$new_category <- "Water"
+
+em_bub <- em_for_bub[rownames(em_for_bub) %in% in_em,]
+em_bub$asv <- rownames(em_bub)
+em_bub <- reshape2::melt(em_bub)
+em_bub <- em_bub %>% group_by(asv) %>% summarise(tot = mean(value))
+
+em_bub$days_since_deploy <- "T0"
+em_bub$treatment <- "EM"
+em_bub <- em_bub[,c(1,4,3,2)]
+em_bub$new_category <- "EM"
+names(em_bub) <- names(water_bub)
+
+all_bub <- plyr::rbind.fill(sed_bub, water_bub)
+
+
+all_bub <- plyr::rbind.fill(all_bub, em_bub)
+all_bub$days_since_deploy[all_bub$treatment=="Genki Ball"] <- "T0"
+all_bub$new_category[all_bub$treatment=="Genki Ball"] <- "Genki Ball"
+
+
+#all_bub$days_since_deploy[all_bub$new_category=="EM"] <- "0"
+
+all_bub$days_since_deploy = factor(all_bub$days_since_deploy, levels = c("T100", "T70", "T35", "T7", "T0"))
+
+#remove control
+all_bub <- all_bub[all_bub$treatment!="Control",]
+
+all_bub <- dplyr::arrange(all_bub, new_category, desc(tot))
+
+first_set <- c("ASV45", "ASV61", "ASV179", "ASV665", "ASV142", "ASV232", "ASV352")
+second_set <- setdiff(unique(all_bub$asv), first_set)
+
+all_bub$asv <- factor(all_bub$asv,
+                      levels = c(first_set, second_set))
+
+bubble_colors <- c(
+  "EM" = "#6B9AC4",
+  "Genki Ball" = "#4059AD",
+  "High" = "#2D7660",
+  "Low" = "#97D8C4")
+
+all_bub$treatment <- factor(all_bub$treatment, levels=c("EM", "Genki Ball", "Low", "High"))
+
+# Create the plot
+time_bub <- ggplot(all_bub, aes(x = asv, 
+                                    y = days_since_deploy, 
+                                    size = tot,
+                                    color = treatment)) +
+  geom_point(alpha = 0.7) +
+  #theme_bw() +
+  scale_size_continuous(limits = c(0.000001, 100), 
+                       range = c(1,150), 
+                       breaks = c(0.001, 0.01, 0.1, 0.5)) +
+  labs(x = "ASV", y = "Timepoint", size = "Relative Abundance", color = "Treatment") +
+  scale_color_manual(values = bubble_colors) +
+   facet_wrap(~ new_category, nrow = 4, strip.position = "left", scales = "free_y", space = "free_y") +
+    theme(panel.spacing = unit(0, "lines"), 
+         strip.background = element_blank(),
+         strip.placement = "outside",
+         axis.text.x = element_text(angle = 45, hjust = 1),
+         panel.background = element_rect(fill="white", color=NA),
+         panel.grid.major = element_line(color="gray90"),) 
+  
+
+ggsave("figures/newseqs/figs_apr2026/bubbles_over_time.pdf", time_bub, width=12, height=5.6)
+
+```
+
+
+
+
+EM and GB taxonomy
+```{r, include=FALSE, eval=FALSE}
+em_tax <- tax[tax$ASV_name %in% em_asvs,]
+gb_tax <- tax[tax$ASV_name %in% ball_asv,]
+
+em_and_gb <- intersect(em_tax$ASV_name, gb_tax$ASV_name)
+em_o <- setdiff(em_tax$ASV_name, gb_tax$ASV_name)
+gb_o <- setdiff(gb_tax$ASV_name, em_tax$ASV_name)
+
+taxy <- tax
+taxy$em_or_gb <- "placeholder"
+taxy$em_or_gb[taxy$ASV_name %in% em_and_gb] = "EM and Genki Ball"
+taxy$em_or_gb[taxy$ASV_name %in% em_o] = "EM Only"
+taxy$em_or_gb[taxy$ASV_name %in% gb_o] = "Genki Ball Only"
+
+taxy <- taxy[taxy$em_or_gb!="placeholder",]
+
+write.csv(em_tax, "outputs/em_asv_taxonomy.csv")
+```
+
+
+# NMDS 
+
+```{r, warning=FALSE, message=FALSE, fig.height=8, fig.width=8.5}
+# sediment, water, EM, and genki balls
+for_nmds <- asv_ra
+for_nmds <- subset(for_nmds, select=-c(NTC1, NTC2, NTC3, NTC4, PCRpos, G45, G27)) # remove negatives, positive, and resequenced samples
+for_nmds <- select(for_nmds, -contains("HMP")) # remove marsh samples
+for_nmds <- select(for_nmds, -contains("GBC")) # remove additional genki balls
+for_nmds <- as.data.frame(t(for_nmds))
+for_nmds$sample_id <- rownames(for_nmds)
+  
+em_data$asv <- rownames(em_data)
+em_long <- reshape2::melt(em_data)
+em_long$treatment <- "EM"
+all_long <- plyr::rbind.fill(sed_long, water_long)
+all_long <- plyr::rbind.fill(all_long, em_long)
+
+for_nmds$treatment <- all_long$treatment[match(for_nmds$sample_id, all_long$variable)]
+for_nmds$days_since_deploy <- all_long$days_since_deploy[match(for_nmds$sample_id, all_long$variable)]
+for_nmds$tank <- all_long$tank[match(for_nmds$sample_id, all_long$variable)]
+
+matrix_nmds <- as.matrix(for_nmds[,1:(ncol(for_nmds)-4)]) # remove metadata columns
+
+
+# justification for weakties = FALSE: https://stackoverflow.com/questions/53981811/why-does-metamds-produce-a-horizontal-distribution-of-our-data
+all_nmds <- metaMDS(matrix_nmds, distance = "bray")
+all_nmds_scores <- as.data.frame(scores(all_nmds)$sites)
+
+all_nmds_scores$treatment = for_nmds$treatment[match(for_nmds$sample_id, rownames(all_nmds_scores))]
+all_nmds_scores$timepoint = for_nmds$timepoint[match(for_nmds$sample_id, rownames(all_nmds_scores))]
+all_nmds_scores$tank = for_nmds$tank[match(for_nmds$sample_id, rownames(all_nmds_scores))]
+all_nmds_scores$tank <- factor(all_nmds_scores$tank, levels=1:9)
+all_nmds_scores$days_since_deployment = for_nmds$days_since_deploy[match(for_nmds$sample_id, rownames(all_nmds_scores))]
+all_nmds_scores$days_since_deployment <- as.character(all_nmds_scores$days_since_deployment)
+all_nmds_scores$days_since_deployment <- factor(all_nmds_scores$days_since_deployment,
+                                                levels = c("T0","T7","T35","T70","T100"))
+
+all_nmds_scores$compartment = ifelse(grepl("G", rownames(all_nmds_scores)), "Sediment", "Water")
+all_nmds_scores$compartment = ifelse(grepl("B", rownames(all_nmds_scores)), "Genki Ball", all_nmds_scores$compartment)
+all_nmds_scores$compartment = ifelse(grepl("EM", rownames(all_nmds_scores)), "EM", all_nmds_scores$compartment)
+
+gen_palette <- c("#4059AD", "#DDDDDD", "#6B9AC4", "#97D8C4", "#117733", "#999933","#F4B942",
+                 "#CC6677", "#882255","#AA4499", "darkorchid4")
+
+#library(ggrepel)
+library(ggforce)
+all_nmds_plot <- ggplot(all_nmds_scores, aes(x = NMDS1, y = NMDS2,
+                                             shape = treatment, 
+                                             #color = tank,
+                                             fill = days_since_deployment,
+                                             color = compartment))+
+                                             #size = compartment)) +
+    geom_point(size = 4)+
+  #scale_color_manual(values=c("#F4B942", "#AA4499", "#4059AD")) +
+  scale_shape_manual(values = c(21,22,23,24,25)) +
+  #stat_ellipse(aes(x = NMDS1, y = NMDS2, fill = treatment), alpha=0.2) +
+  ggforce::geom_mark_ellipse(inherit.aes = FALSE, aes(x = NMDS1, y = NMDS2, group=compartment, color=compartment)) +
+  scale_fill_brewer(palette = "Set2") +
+  geom_text(data=all_nmds_scores,aes(x=NMDS1,y=NMDS2,label=tank),size=4, color="black",vjust=1,hjust=-1) +
+  #scale_size_manual(values = c(4, 2)) +
+    # geom_label_repel(aes(label = tank),
+    #               box.padding   = 0.35,
+    #               point.padding = 0.5,
+    #               segment.color = 'grey50',
+    #               max.overlaps = 70) +
+    #stat_ellipse(aes(x = NMDS1, y = NMDS2, group = compartment), level = 0.50, size=1) +
+    theme(axis.text.y = element_text(colour = "black", size = 20),
+    axis.text.x = element_text(colour = "black", size = 20),
+    legend.text = element_text(size = 20, colour ="black"),
+    legend.position = "bottom",
+    legend.box = "vertical",
+    axis.title.y = element_text(size = 20, vjust=3),
+    axis.title.x = element_text(size = 20, vjust=-2),
+    legend.title = element_text(size = 20, colour = "black"),
+    plot.margin = unit(c(1,1,1,1), "cm"),
+    panel.background = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = 1.2),
+    legend.key=element_blank()) +
+     guides(fill = guide_legend(override.aes = list(shape=21))) +
+    annotate("text", label="stress=0.115", y=-2.35, x=1.25, colour="black", size = 7) +
+    labs(x = "NMDS1", y = "NMDS2", shape = "Treatment", fill = "Timepoint",
+         color = "Compartment") +
+    theme(axis.title.x = element_text(margin = margin(b = 10, unit = "pt")))
+
+all_nmds_plot
+
+ggsave("figures/newseqs/figs_apr2026/nmds_with_ellipses.png", all_nmds_plot, height = 8, width = 8.5)
+
+
+# permanova
+# remove em and gb for this analysis
+perm_matrix <- matrix_nmds[!grepl("EM|B", rownames(matrix_nmds)),]
+perm_scores <- all_nmds_scores[!grepl("EM|B", rownames(all_nmds_scores)),]
+
+perm_by_treat_and_time <- adonis2(perm_matrix ~ perm_scores$treatment*perm_scores$days_since_deployment, permutations = 9999, method = "bray")
+
+# beta dispersion
+bc_mat <- vegdist(perm_matrix)
+
+treat_bd <- betadisper(bc_mat, perm_scores$treatment)
+anova(treat_bd)
+time_bd <- betadisper(bc_mat, perm_scores$days_since_deployment)
+anova(time_bd)
+
+
+```
+
+## NMDSv2
+
+```{r, echo=FALSE, eval=FALSE}
+# samples as rows, asvs as columns
+sed_for_nmds <- sed[,grepl("G", names(sed))]
+sed_for_nmds <- as.data.frame(t(sed_for_nmds))
+sed_for_nmds$sample_id <- rownames(sed_for_nmds)
+
+sed_for_nmds <- sed_for_nmds %>%
+  mutate(treatment = case_when(grepl("H", sample_id) ~ "High",
+                              grepl("C", sample_id) ~ "Control",
+                              grepl("L", sample_id) ~ "Low",
+                              grepl("B", sample_id) ~ "Genki Ball",))
+sed_for_nmds$timepoint <- str_sub(sed_for_nmds$sample_id, -1)
+
+nmds_sed_matrix <- as.matrix(sed_for_nmds[,1:7682])
+
+nmds_sediment <- metaMDS(nmds_sed_matrix, distance = "bray")
+nmds_sed_scores <- as.data.frame(scores(nmds_sediment)$sites)
+
+nmds_sed_scores$treatment = sed_for_nmds$treatment[match(sed_for_nmds$sample_id, rownames(nmds_sed_scores))]
+nmds_sed_scores$timepoint = sed_for_nmds$timepoint[match(sed_for_nmds$sample_id, rownames(nmds_sed_scores))]
+
+sediment_nmds_plot <- ggplot(nmds_sed_scores, aes(x = NMDS1, y = NMDS2)) +
+    geom_point(data = nmds_sed_scores, size = 4, aes(shape = treatment, colour = timepoint))+
+    #stat_ellipse(aes(x = NMDS1, y = NMDS2, group = treatment, color=treatment), level = 0.50, size=1) +
+    theme(axis.text.y = element_text(colour = "black", size = 20),
+    axis.text.x = element_text(colour = "black", size = 20),
+    legend.text = element_text(size = 20, colour ="black"),
+    legend.position = "right",
+    axis.title.y = element_text(size = 20, vjust=3),
+    axis.title.x = element_text(size = 20, vjust=-2),
+    legend.title = element_text(size = 20, colour = "black"),
+    plot.margin = unit(c(1,1,1,1), "cm"),
+    panel.background = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = 1.2),
+    legend.key=element_blank()) +
+    annotate("text", label="stress=0.261", x=-0.01, y=-0.71, colour="black", size = 7) +
+    labs(x = "NMDS1", y = "NMDS2", shape = "Treatment", colour = "Timepoint") 
+```
+
+```{r, echo=FALSE, eval=FALSE}
+sed_perm_treat <- adonis2(nmds_sed_matrix ~ nmds_sed_scores$treatment, permutations = 9999, method = "bray")
+
+sed_perm_time <- adonis2(nmds_sed_matrix ~ nmds_sed_scores$timepoint, permutations = 9999, method = "bray")
+
+# beta dispersion
+bc_mat_sed <- vegdist(nmds_sed_matrix)
+
+sed_treat_bd <- betadisper(bc_mat_sed, nmds_sed_scores$treatment)
+anova(sed_treat_bd)
+
+test <- nmds_sed_matrix[1:45,]
+test_bc <- vegdist(test)
+
+x <- betadisper(test_bc, nmds_sed_scores$treatment[1:45])
+```
+
+```{r, include=FALSE, eval=FALSE}
+library(Biostrings)
+
+s = readDNAStringSet("qiime2/repseqs/dna-sequences.fasta")
+t = as.data.frame(s)
+t$featureid <- rownames(t)
+write.csv(t, "outputs/newsamps/tank_and_field_repseqs.csv")
+
+t$asv <- tax$ASV_name[match(tax$Feature.ID, t$featureid)]
+em_repseqs <- t[t$asv %in% em_asvs,]
+
+em_repseqs$tax <- original_tax$Taxon[match(em_repseqs$featureid, original_tax$Feature.ID)]
+em_repseqs$category <- "EM"
+
+write.csv( em_repseqs, "em_repseqs.csv")
+
+gb_repseqs <- t[t$asv %in% ball_asv,]
+gb_repseqs$tax <- original_tax$Taxon[match(gb_repseqs$featureid, original_tax$Feature.ID)]
+
+gb_repseqs$category <- "Genki Ball"
+
+all <- rbind(em_repseqs, gb_repseqs)
+
+write.csv(all, "em_and_gb_repseqs.csv")
+
+
+dat <- data.frame(all$asv, all$x)
+library(seqRFLP)
+dataframe2fas(dat, file="em_genkiball.fasta")
+
+
+taxy$repseq <- t$x[match(taxy$Feature.ID, t$featureid,)]
+write.csv(taxy, "em_genkiball_taxonomy.csv")
+
+tax$repseq <- t$x[match(tax$Feature.ID, t$featureid)]
+write.csv(tax, "tank_experiment_taxonomy.csv")
+write.csv(tax, "outputs/newsamps/tank_and_field_taxonomy.csv")
+```
+
+
+
