@@ -1220,63 +1220,6 @@ wat_disp$interaction
 
 ```
 
-## NMDSv2
-
-```{r, echo=FALSE, eval=FALSE}
-# samples as rows, asvs as columns
-sed_for_nmds <- sed[,grepl("G", names(sed))]
-sed_for_nmds <- as.data.frame(t(sed_for_nmds))
-sed_for_nmds$sample_id <- rownames(sed_for_nmds)
-
-sed_for_nmds <- sed_for_nmds %>%
-  mutate(treatment = case_when(grepl("H", sample_id) ~ "High",
-                              grepl("C", sample_id) ~ "Control",
-                              grepl("L", sample_id) ~ "Low",
-                              grepl("B", sample_id) ~ "Genki Ball",))
-sed_for_nmds$timepoint <- str_sub(sed_for_nmds$sample_id, -1)
-
-nmds_sed_matrix <- as.matrix(sed_for_nmds[,1:7682])
-
-nmds_sediment <- metaMDS(nmds_sed_matrix, distance = "bray")
-nmds_sed_scores <- as.data.frame(scores(nmds_sediment)$sites)
-
-nmds_sed_scores$treatment = sed_for_nmds$treatment[match(sed_for_nmds$sample_id, rownames(nmds_sed_scores))]
-nmds_sed_scores$timepoint = sed_for_nmds$timepoint[match(sed_for_nmds$sample_id, rownames(nmds_sed_scores))]
-
-sediment_nmds_plot <- ggplot(nmds_sed_scores, aes(x = NMDS1, y = NMDS2)) +
-    geom_point(data = nmds_sed_scores, size = 4, aes(shape = treatment, colour = timepoint))+
-    #stat_ellipse(aes(x = NMDS1, y = NMDS2, group = treatment, color=treatment), level = 0.50, size=1) +
-    theme(axis.text.y = element_text(colour = "black", size = 20),
-    axis.text.x = element_text(colour = "black", size = 20),
-    legend.text = element_text(size = 20, colour ="black"),
-    legend.position = "right",
-    axis.title.y = element_text(size = 20, vjust=3),
-    axis.title.x = element_text(size = 20, vjust=-2),
-    legend.title = element_text(size = 20, colour = "black"),
-    plot.margin = unit(c(1,1,1,1), "cm"),
-    panel.background = element_blank(),
-    panel.border = element_rect(colour = "black", fill = NA, size = 1.2),
-    legend.key=element_blank()) +
-    annotate("text", label="stress=0.261", x=-0.01, y=-0.71, colour="black", size = 7) +
-    labs(x = "NMDS1", y = "NMDS2", shape = "Treatment", colour = "Timepoint") 
-```
-
-```{r, echo=FALSE, eval=FALSE}
-sed_perm_treat <- adonis2(nmds_sed_matrix ~ nmds_sed_scores$treatment, permutations = 9999, method = "bray")
-
-sed_perm_time <- adonis2(nmds_sed_matrix ~ nmds_sed_scores$timepoint, permutations = 9999, method = "bray")
-
-# beta dispersion
-bc_mat_sed <- vegdist(nmds_sed_matrix)
-
-sed_treat_bd <- betadisper(bc_mat_sed, nmds_sed_scores$treatment)
-anova(sed_treat_bd)
-
-test <- nmds_sed_matrix[1:45,]
-test_bc <- vegdist(test)
-
-x <- betadisper(test_bc, nmds_sed_scores$treatment[1:45])
-```
 
 ```{r, include=FALSE, eval=FALSE}
 library(Biostrings)
