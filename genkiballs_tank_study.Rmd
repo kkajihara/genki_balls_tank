@@ -496,8 +496,8 @@ ggsave("figures/newseqs/forum/em_taxabar_clos_collapsed.pdf", em_taxabar, width=
 library(patchwork)
 twoplot <- em_taxabar + balltax
 
-ggsave("figures/newseqs/figs_apr2026/em_gb_taxonomy.png", twoplot, width=11, height=4.5)
-ggsave("figures/newseqs/figs_apr2026/em_gb_taxonomy.pdf", twoplot, width=11, height=4.5)
+#ggsave("figures/newseqs/figs_apr2026/em_gb_taxonomy.png", twoplot, width=11, height=4.5)
+#ggsave("figures/newseqs/figs_apr2026/em_gb_taxonomy.pdf", twoplot, width=11, height=4.5)
 
 # library(Polychrome)
 # # create your own color palette (50 colors) based on `seedcolors`
@@ -1152,17 +1152,78 @@ ggsave("figures/newseqs/figs_apr2026/nmds_with_ellipses.png", all_nmds_plot, hei
 # permanova
 # remove em and gb for this analysis
 perm_matrix <- matrix_nmds[!grepl("EM|B", rownames(matrix_nmds)),]
-perm_scores <- all_nmds_scores[!grepl("EM|B", rownames(all_nmds_scores)),]
 
-perm_by_treat_and_time <- adonis2(perm_matrix ~ perm_scores$treatment*perm_scores$days_since_deployment, permutations = 9999, method = "bray")
+sed_mat <- perm_matrix[grepl("G", rownames(perm_matrix)),]
+sed_mat <- sed_mat[,colSums(sed_mat)>0]
+# reorder sample names in metadata to match matrix row order
+sed_meta <- sed_metadata[match(rownames(sed_mat), sed_metadata$Combined.Name), ]
+sed_meta$Timepoint = factor(sed_meta$Timepoint)
+# check
+all(sed_meta$Combined.Name == rownames(sed_mat))
+  
 
-# beta dispersion
-bc_mat <- vegdist(perm_matrix)
+wat_mat <- perm_matrix[!grepl("G", rownames(perm_matrix)),]
+wat_mat <- wat_mat[,colSums(wat_mat)>0]
 
-treat_bd <- betadisper(bc_mat, perm_scores$treatment)
-anova(treat_bd)
-time_bd <- betadisper(bc_mat, perm_scores$days_since_deployment)
-anova(time_bd)
+wat_meta <- water_metadata[match(rownames(wat_mat), water_metadata$Sample.ID), ]
+wat_meta$Days.Since.Deployment <- factor(wat_meta$Days.Since.Deployment)
+# check
+all(wat_meta$Sample.ID == rownames(wat_mat))
+
+# run permanovas
+library(permute)
+sed_permutations <- how(nperm = 9999, blocks = sed_meta$Tank)
+
+sediment_permanova <- adonis2(sed_mat ~ Timepoint * Treatment.Group,
+                              data = sed_meta,
+                              method = "bray",
+                              permutations = sed_permutations,
+                              by = "terms")
+
+
+wat_permutations <- how(nperm = 9999, blocks = wat_meta$Tank)
+
+water_permanova <- adonis2(wat_mat ~ Days.Since.Deployment * Treatment.Group,
+                              data = wat_meta,
+                              method = "bray",
+                              permutations = wat_permutations,
+                              by = "terms")
+
+
+# beta dispersion - sediment
+bc <- vegdist(sed_mat, method = "bray")
+
+# Treatment
+disp_trt <- betadisper(bc, sed_meta$Treatment.Group)
+anova(disp_trt)
+
+# Timepoint
+disp_time <- betadisper(bc, factor(sed_meta$Timepoint))
+anova(disp_time)
+
+# Treatment × Timepoint combinations (matches your interaction term)
+grp <- interaction(sed_meta$Treatment.Group, sed_meta$Timepoint)
+disp_int <- betadisper(bc, grp)
+anova(disp_int)
+
+
+# beta dispersion - water
+bc <- vegdist(wat_mat, method = "bray")
+
+# Treatment
+disp_trt <- betadisper(bc, wat_meta$Treatment.Group)
+anova(disp_trt)
+
+# Timepoint
+disp_time <- betadisper(bc, factor(wat_meta$Days.Since.Deployment))
+anova(disp_time)
+
+# Treatment × Timepoint combinations (matches your interaction term)
+grp <- interaction(wat_meta$Treatment.Group, wat_meta$Days.Since.Deployment)
+disp_int <- betadisper(bc, grp)
+anova(disp_int)
+
+
 
 
 ```
