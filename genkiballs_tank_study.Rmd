@@ -1190,40 +1190,32 @@ water_permanova <- adonis2(wat_mat ~ Days.Since.Deployment * Treatment.Group,
                               by = "terms")
 
 
-# beta dispersion - sediment
-bc <- vegdist(sed_mat, method = "bray")
+library(vegan)
+library(permute)
 
-# Treatment
-disp_trt <- betadisper(bc, sed_meta$Treatment.Group)
-anova(disp_trt)
+run_disp <- function(mat, meta, time_col) {
+  bc   <- vegdist(mat, method = "bray")
+  perm <- how(nperm = 9999, blocks = meta$Tank)
 
-# Timepoint
-disp_time <- betadisper(bc, factor(sed_meta$Timepoint))
-anova(disp_time)
+  disp_time <- betadisper(bc, factor(meta[[time_col]]))
+  disp_int  <- betadisper(bc, interaction(meta$Treatment.Group, meta[[time_col]]))
 
-# Treatment × Timepoint combinations (matches your interaction term)
-grp <- interaction(sed_meta$Treatment.Group, sed_meta$Timepoint)
-disp_int <- betadisper(bc, grp)
-anova(disp_int)
+  set.seed(123); tim <- permutest(disp_time, permutations = perm)
+  set.seed(123); int <- permutest(disp_int,  permutations = perm)
 
+  list(time = tim, interaction = int,
+       disp_time = disp_time, disp_int = disp_int)
+}
 
-# beta dispersion - water
-bc <- vegdist(wat_mat, method = "bray")
-
-# Treatment
-disp_trt <- betadisper(bc, wat_meta$Treatment.Group)
-anova(disp_trt)
-
-# Timepoint
-disp_time <- betadisper(bc, factor(wat_meta$Days.Since.Deployment))
-anova(disp_time)
-
-# Treatment × Timepoint combinations (matches your interaction term)
-grp <- interaction(wat_meta$Treatment.Group, wat_meta$Days.Since.Deployment)
-disp_int <- betadisper(bc, grp)
-anova(disp_int)
+sed_disp <- run_disp(sed_mat, sed_meta, "Timepoint")
+wat_disp <- run_disp(wat_mat, wat_meta, "Days.Since.Deployment")
 
 
+sed_disp$time
+sed_disp$interaction
+
+wat_disp$time
+wat_disp$interaction
 
 
 ```
